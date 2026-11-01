@@ -48,36 +48,208 @@
 		Give a high-level overview of what you implemented in this homework. Think about what you've built as a whole. Share your thoughts on what interesting things you've learned from completing the homework.
 
 		<h2>Part 1: Ray Generation and Scene Intersection</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
 
-		<p>Here is an example 2x2 gridlike structure using an HTML table. Each <b>tr</b> is a row and each <b>td</b> is a column in that row. You might find this useful for framing and showing your result images in an organized fashion.</p>
+		<h3>Ray generation and the rendering pipeline</h3>
+		<p>
+			Rendering starts in <code>PathTracer::raytrace_pixel(x, y)</code>, which is called once for every pixel of the output image.
+			The pixel is given by the integer coordinates of its bottom-left corner. To anti-alias, I take
+			<code>ns_aa</code> random samples inside the pixel. For each sample, <code>gridSampler-&gt;get_sample()</code>
+			returns a random offset \((\delta_x, \delta_y) \in [0,1)^2\), and I convert the sample point to normalized image coordinates:
+			\[ \left(\frac{x + \delta_x}{w},\ \frac{y + \delta_y}{h}\right) \in [0,1]^2, \]
+			where \(w, h\) are the width and height of the sample buffer. I pass these coordinates to <code>Camera::generate_ray</code> and give the
+			resulting ray to <code>est_radiance_global_illumination</code>. Finally, the returned radiance values are averaged
+			(a Monte Carlo estimate of the integral of radiance over the pixel) and written with <code>sampleBuffer.update_pixel</code>.
+		</p>
+		<p>
+			<code>Camera::generate_ray(x, y)</code> maps a normalized image point to a ray in world space. In camera space, the camera
+			sits at the origin looking down \(-z\), and the virtual sensor is the plane \(z=-1\). Its corners lie at
+			\((\pm\tan\frac{hFov}{2}, \pm\tan\frac{vFov}{2}, -1)\), with the FOV angles converted from degrees to radians first. Normalized \((0,0)\) maps to the bottom-left
+			corner and \((1,1)\) to the top-right, so the sensor point is
+			\[ \mathbf{p}_{cam} = \left( (2x-1)\tan\tfrac{hFov}{2},\ (2y-1)\tan\tfrac{vFov}{2},\ -1 \right). \]
+			The ray direction is this point rotated into world space by the camera-to-world matrix and then normalized,
+			\(\mathbf{d} = \text{normalize}(c2w \cdot \mathbf{p}_{cam})\). The ray's origin is the camera position <code>pos</code>. I also set the ray's valid
+			interval to \([t_{min}, t_{max}] = [\text{nClip}, \text{fClip}]\), the camera's near and far clipping distances, so that geometry
+			closer than the near plane or beyond the far plane is ignored.
+		</p>
+		<p>
+			Each primitive's <code>intersect</code> function tests a ray for a hit. A hit only counts if its parameter \(t\) lies inside
+			\([t_{min}, t_{max}]\). When a hit counts, the primitive sets <code>r.max_t = t</code>, which shrinks the valid interval. Later tests
+			against other primitives then accept only <em>closer</em> hits, so after every primitive has been tested, the stored
+			<code>Intersection</code> is the nearest one. The intersection records \(t\), the surface normal, the primitive hit, and its BSDF.
+			In this part, the radiance estimate simply maps the normal to a color, \(\mathbf{n}/2 + 0.5\), which produces the
+			normal-shaded images below.
+		</p>
+
+		<h3>Ray-triangle intersection</h3>
+		<p>
+			A ray \(\mathbf{o} + t\mathbf{d}\) hits the plane of triangle \((\mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3)\) at a point that
+			can be written in barycentric form as \(\mathbf{p}_1 + u(\mathbf{p}_2-\mathbf{p}_1) + v(\mathbf{p}_3-\mathbf{p}_1)\).
+			Setting the two expressions equal, with \(\mathbf{e}_1 = \mathbf{p}_2-\mathbf{p}_1\) and \(\mathbf{e}_2 = \mathbf{p}_3-\mathbf{p}_1\), gives a
+			3&times;3 linear system in the three unknowns \(t, u, v\):
+			\[ \begin{bmatrix} -\mathbf{d} & \mathbf{e}_1 & \mathbf{e}_2 \end{bmatrix}
+			   \begin{bmatrix} t \\ u \\ v \end{bmatrix} = \mathbf{o} - \mathbf{p}_1 . \]
+			My implementation builds this matrix column by column and first checks its determinant. If \(|\det| \approx 0\) (I use a
+			threshold of \(10^{-12}\)), the ray is parallel to the triangle's plane, so there is no hit. I chose such a small threshold
+			deliberately, because the determinant scales with triangle area. A larger epsilon would wrongly reject the tiny triangles
+			of dense meshes. Otherwise, I solve the system by multiplying by the inverse matrix. A solution is a valid hit only if
+		</p>
+		<ul>
+			<li>\(u \ge 0,\ v \ge 0,\ u + v \le 1\): the hit point is inside the triangle, not just on its plane, and</li>
+			<li>\(t_{min} \le t \le t_{max}\): the hit is within the ray's valid interval, which also ensures it is the closest hit found so far.</li>
+		</ul>
+		<p>
+			On a valid hit, I update <code>r.max_t = t</code> and fill in the <code>Intersection</code>. The barycentric coordinates of the hit
+			point with respect to \(\mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3\) are \((1-u-v,\ u,\ v)\), so I use them to interpolate the vertex normals:
+			\(\mathbf{n} = \text{normalize}\big((1-u-v)\mathbf{n}_1 + u\,\mathbf{n}_2 + v\,\mathbf{n}_3\big)\). This is why the curved
+			meshes below look smooth instead of faceted. <code>has_intersection</code> simply calls <code>intersect</code> with a temporary
+			<code>Intersection</code>, so the intersection math lives in one place.
+		</p>
+
+		<h3>Ray-sphere intersection</h3>
+		<p>
+			For a sphere with center \(\mathbf{c}\) and radius \(R\), substituting the ray into \(|\mathbf{p}-\mathbf{c}|^2 = R^2\)
+			gives the quadratic \(at^2 + bt + c = 0\) with \(a = \mathbf{d}\cdot\mathbf{d}\),
+			\(b = 2\,\mathbf{d}\cdot(\mathbf{o}-\mathbf{c})\), and \(c = |\mathbf{o}-\mathbf{c}|^2 - R^2\). If the discriminant
+			\(b^2-4ac\) is negative, the ray misses. Otherwise the two roots \(t_1 \le t_2\) are where the ray enters and exits the sphere. I take
+			\(t_1\) if it is in \([t_{min}, t_{max}]\), and otherwise \(t_2\), which handles rays that start inside the sphere. The normal at the
+			hit point \(\mathbf{p}\) is \(\text{normalize}(\mathbf{p}-\mathbf{c})\).
+		</p>
+
+		<h3>Results</h3>
+		<p>Normal-shaded renders of small scenes (480&times;360, 4 samples per pixel, 8 threads):</p>
 		<div style="display: flex; flex-direction: column; align-items: center;">
 			<table style="width: 100%; text-align: center; border-collapse: collapse;">
 			  <tr>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1/CBempty.png" width="400px"/>
+				  <figcaption><code>CBempty.dae</code>: triangles only</figcaption>
 				</td>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1/CBspheres_lambertian.png" width="400px"/>
+				  <figcaption><code>CBspheres_lambertian.dae</code>: triangles and spheres</figcaption>
 				</td>
 			  </tr>
 			  <tr>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1/CBgems.png" width="400px"/>
+				  <figcaption><code>CBgems.dae</code>: faceted gem meshes</figcaption>
 				</td>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/part1/teapot.png" width="400px"/>
+				  <figcaption><code>teapot.dae</code>: smooth shading from interpolated vertex normals</figcaption>
 				</td>
 			  </tr>
 			</table>
 		</div>
-		
+
 		<h2>Part 2: Bounding Volume Hierarchy</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+		<h3>BVH construction</h3>
+		<p>
+			<code>BVHAccel::construct_bvh(start, end, max_leaf_size)</code> builds the tree recursively over the range
+			<code>[start, end)</code> of the primitive vector:
+		</p>
+		<ol>
+			<li><b>Bounding box.</b> I loop over the primitives in the range and expand a <code>BBox</code> by each primitive's
+				box. This becomes the box of the new node, and it encloses everything below that node.</li>
+			<li><b>Leaf case.</b> If the range holds at most <code>max_leaf_size</code> primitives (4 by default), the node becomes a
+				leaf. It stores the iterators <code>start</code> and <code>end</code>, and the recursion stops.</li>
+			<li><b>Split.</b> Otherwise, I sort the primitives in the range by the x-coordinate of their bounding-box centroids and
+				split the range at its middle element, <code>mid = start + size/2</code>. Both halves
+				<code>[start, mid)</code> and <code>[mid, end)</code> are built recursively and become the left and right children.
+				The sort rearranges the shared primitive vector in place. Each recursive call only touches its own non-overlapping range,
+				so every leaf's iterators still point at exactly its own primitives.</li>
+		</ol>
+		<p>
+			<b>Split-point heuristic: median along x.</b> I split at the median centroid, not at the spatial midpoint of the
+			box, for two reasons. First, the median guarantees that both children get about half of the primitives. The tree is
+			therefore balanced, with depth about \(\log_2(n/4)\). Second, neither child can ever be empty. With a midpoint
+			split, all centroids can land on one side, and the recursion never terminates. The median avoids this
+			by construction, so no special case is needed. A cost of this simple heuristic is that it always splits along x. It ignores the axis along
+			which the primitives are actually spread out, so tall or deep models get long, thin, overlapping boxes. That is a
+			likely reason why <code>maxplanck</code> and <code>wall-e</code> need about 270&ndash;290 intersection tests per ray, while
+			<code>CBlucy</code> and <code>CBdragon</code> need about 60. Splitting along the axis with the largest centroid extent,
+			or using the surface area heuristic, should reduce this. Building is cheap anyway: the largest scene, <code>wall-e</code> with
+			240k primitives, builds in 0.72 s.
+		</p>
+
+		<h3>BVH traversal</h3>
+		<p>
+			<code>BBox::intersect</code> uses the slab method. For each axis, it computes the times at which the ray crosses the box's two
+			planes. The ray is inside the box from the latest entry time to the earliest exit time, and it misses if that interval is
+			empty or does not overlap the ray's \([t_{min}, t_{max}]\). <code>BVHAccel::intersect</code> first tests a node's box and
+			skips the whole subtree if the ray misses it. At a leaf, it tests every primitive. At an interior node, it visits
+			<em>both</em> children before combining their results. A hit in the left child must not short-circuit the right child,
+			because sibling boxes can overlap and the right one may hold a closer surface. Each primitive shrinks
+			<code>r.max_t</code> when it accepts a hit, so the nearest hit wins automatically, and boxes beyond it get rejected.
+		</p>
+
+		<h3>Large scenes rendered with BVH acceleration</h3>
+		<p>Normal-shaded renders at 480&times;360, 1 sample per pixel, 8 threads. Times are wall-clock render times:</p>
+		<div style="display: flex; flex-direction: column; align-items: center;">
+			<table style="width: 100%; text-align: center; border-collapse: collapse;">
+			  <tr>
+				<td style="text-align: center;">
+				  <img src="assets/part2/CBlucy.png" width="400px"/>
+				  <figcaption><code>CBlucy.dae</code>: 133,796 primitives, 1.17 s</figcaption>
+				</td>
+				<td style="text-align: center;">
+				  <img src="assets/part2/CBdragon.png" width="400px"/>
+				  <figcaption><code>CBdragon.dae</code>: 100,012 primitives, 0.98 s</figcaption>
+				</td>
+			  </tr>
+			  <tr>
+				<td style="text-align: center;">
+				  <img src="assets/part2/maxplanck.png" width="400px"/>
+				  <figcaption><code>maxplanck.dae</code>: 50,801 primitives, 6.62 s</figcaption>
+				</td>
+				<td style="text-align: center;">
+				  <img src="assets/part2/wall-e.png" width="400px"/>
+				  <figcaption><code>wall-e.dae</code>: 240,326 primitives, 5.41 s</figcaption>
+				</td>
+			  </tr>
+			  <tr>
+				<td style="text-align: center;">
+				  <img src="assets/part2/peter.png" width="400px"/>
+				  <figcaption><code>peter.dae</code>: 40,018 primitives, 3.53 s</figcaption>
+				</td>
+				<td style="text-align: center;">
+				  <img src="assets/part2/beast.png" width="400px"/>
+				  <figcaption><code>beast.dae</code>: 64,618 primitives, 3.03 s</figcaption>
+				</td>
+			  </tr>
+			</table>
+		</div>
+
+		<h3>Rendering time with and without the BVH</h3>
+		<p>
+			To measure brute force with the same code, I added a <code>-n</code> command-line flag. It builds the "BVH" with
+			<code>max_leaf_size</code> equal to the number of primitives, so the root is a single leaf and every ray tests every
+			primitive, which is what the starter code did. All runs used <code>-t 8 -r 800 600</code> at 1 sample per pixel on
+			the shared instructional machine.
+		</p>
+		<div style="display: flex; justify-content: center;">
+		<table style="border-collapse: collapse; text-align: right;" cellpadding="6" border="1">
+			<tr><th>Scene</th><th>Primitives</th><th>Time, no BVH</th><th>Time, BVH</th><th>Speedup</th><th>Tests/ray, no BVH</th><th>Tests/ray, BVH</th></tr>
+			<tr><td style="text-align:left"><code>CBspheres_lambertian</code></td><td>14</td><td>0.146 s</td><td>0.108 s</td><td>1.4&times;</td><td>7.7</td><td>4.4</td></tr>
+			<tr><td style="text-align:left"><code>CBgems</code></td><td>252</td><td>3.40 s</td><td>0.150 s</td><td>23&times;</td><td>96.7</td><td>7.5</td></tr>
+			<tr><td style="text-align:left"><code>teapot</code></td><td>2,464</td><td>36.5 s</td><td>0.359 s</td><td>101&times;</td><td>1,481.8</td><td>19.5</td></tr>
+			<tr><td style="text-align:left"><code>cow</code></td><td>5,856</td><td>179.2 s</td><td>1.79 s</td><td>100&times;</td><td>2,559.8</td><td>33.2</td></tr>
+			<tr><td style="text-align:left"><code>beetle</code></td><td>7,558</td><td>86.2 s</td><td>0.849 s</td><td>102&times;</td><td>2,336.4</td><td>45.4</td></tr>
+		</table>
+		</div>
+		<p>
+			Without acceleration, the cost per ray grows linearly with scene size. A ray tests nearly every primitive (fewer than
+			all only because rays that miss the scene's overall box are rejected at once), so render time climbs from fractions of a
+			second to minutes as scenes reach thousands of triangles. With the BVH, the tests per ray barely grow: about 4&ndash;8
+			for tiny scenes, 20&ndash;45 for scenes with thousands of triangles, and about 60 even for the 100k&ndash;130k-triangle
+			<code>CBdragon</code> and <code>CBlucy</code>. That is the expected logarithmic scaling, and it turns a
+			3-minute render of the cow into under 2 seconds. Speedups reach about 100&times; for every scene with more than a few thousand
+			primitives. The only scene with little benefit is <code>CBspheres_lambertian</code>, where 14 primitives are cheaper to test
+			directly than to traverse a tree for. The machine was shared and under load, so absolute times are noisy. (The cow's
+			no-BVH run was slower than the beetle's despite having fewer triangles.) The tests-per-ray figures do not depend on load,
+			and they show the same roughly 50&ndash;75&times; reduction for the larger meshes.
+		</p>
 
 		<h2>Part 3: Direct Illumination</h2>
 		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
