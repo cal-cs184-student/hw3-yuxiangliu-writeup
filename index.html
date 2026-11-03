@@ -23,21 +23,32 @@
 			body {
 				font-family: 'Inter', sans-serif;
 			}
+
+			table.data {
+				border-collapse: collapse;
+				margin: 12px auto;
+			}
+
+			table.data th, table.data td {
+				border: 1px solid #bbb;
+				padding: 4px 10px;
+			}
 		</style>
 	</head>
 	<body>
 		<div class="container">
 		<h1>CS184/284A Fall 2026 Homework 3 Write-Up</h1>
-		<div style="text-align: center;">Names: </div>
+		<div style="text-align: center;">Names: Yuxiang Liu</div>
 
 		<br>
 
-		Link to webpage: (TODO) <a href="https://cs184.eecs.berkeley.edu/fa26">cs184.eecs.berkeley.edu/fa26</a>
-		Link to GitHub repository: (TODO) <a href="https://cs184.eecs.berkeley.edu/fa26">cs184.eecs.berkeley.edu/fa26</a>
+		Link to webpage: <a href="https://cal-cs184-student.github.io/hw3-yuxiangliu-writeup/">https://cal-cs184-student.github.io/hw3-yuxiangliu-writeup/</a>
+		<br>
+		Link to GitHub repository: <a href="https://github.com/cal-cs184-student/hw3-yuxiangliu">https://github.com/cal-cs184-student/hw3-yuxiangliu</a>
 		
 		<figure>
-			<img src="assets/cornell.png" alt="Cornell Boxes with Bunnies" style="width:70%"/>
-			<figcaption>You can add images with captions!</figcaption>
+			<img src="assets/part4/spheres_s1024.png" alt="CBspheres_lambertian with global illumination" style="width:70%"/>
+			<figcaption>CBspheres_lambertian.dae with full global illumination (1024 samples per pixel, 4 light rays, max depth 5)</figcaption>
 		</figure>
 
 		<!--
@@ -45,7 +56,16 @@
 		-->
 
 		<h2>Overview</h2>
-		Give a high-level overview of what you implemented in this homework. Think about what you've built as a whole. Share your thoughts on what interesting things you've learned from completing the homework.
+		<p>
+  In this homework I built a physically based path tracer, step by step. First I generated camera rays for each pixel and intersected them with triangles and spheres. Then I added a bounding volume hierarchy (BVH) so that scenes with hundreds of thousands of triangles render in a fraction of a second instead of minutes.
+  On top of that I implemented direct illumination, first by sampling the hemisphere uniformly and then by importance-sampling the lights, and then full global illumination with recursive bounces, Russian roulette path termination, and finally adaptive per-pixel sampling.
+</p>
+<p>
+  The main lessons were about Monte Carlo estimation: every estimator in this project is "sum of \(f \cdot L \cdot \cos\theta / \text{pdf}\), divided by the sample count", and the art is in choosing where to put the samples so the variance is low. Light importance sampling, cosine-weighted BSDF sampling, Russian roulette and adaptive sampling are all different ways of spending samples where they matter.
+  I also learned some practical performance lessons. Choosing the BVH split axis well made rendering more than 40&times; faster on a 100k-triangle scene.
+  Separately, a statistics counter that every render thread incremented on every ray caused enough cache-line contention to make the renderer roughly 8&times; slower; giving each thread its own counter fixed it.
+</p>
+
 
 		<h2>Part 1: Ray Generation and Scene Intersection</h2>
 
@@ -251,28 +271,493 @@
 			and they show the same roughly 50&ndash;75&times; reduction for the larger meshes.
 		</p>
 
+		<h3>Improving the BVH after Part 2</h3>
+		<p>
+			The analysis above pointed at the x-only split as the weak spot, and while working on Part 3 I fixed it. The renderer was also far slower than the course's reference timings, so I made three changes:
+		</p>
+		<ol>
+			<li><b>Longest-axis split.</b> Alongside the node's box, <code>construct_bvh</code> now also computes the bounding box of the primitives' <i>centroids</i> and splits along the axis on which that box is longest, still at the median. I use the centroid box instead of the node's full box because large triangles can stretch the full box along an axis where their centroids barely differ.</li>
+			<li><b><code>std::nth_element</code> instead of <code>std::sort</code>.</b> A median split only needs the median element in the middle position with smaller elements before it and larger ones after it. <code>nth_element</code> does that in \(O(n)\) time instead of \(O(n \log n)\), so the whole build is \(O(n \log n)\) instead of \(O(n \log^2 n)\).</li>
+			<li><b>Near-child-first traversal.</b> <code>BVHAccel::intersect</code> now tests the root's box once, then at each interior node tests both child boxes and visits the child the ray enters first. The far child is visited only if its entry \(t\) is not beyond the ray's current <code>max_t</code>. A hit in the near child shrinks <code>max_t</code>, so the far child is often skipped entirely, and the closest hit is still always found.</li>
+		</ol>
+		<p>
+			On <code>CBdragon.dae</code> (100k triangles), a small test render went from 1.40 s to 0.033 s, more than 40&times; faster, and the build time dropped from 0.32 s to 0.14 s.
+			With the improved BVH, the comparison against brute force looks like this (normal shading, <code>-s 1 -r 480 360</code>, 32 threads):
+		</p>
+		<div style="display: flex; justify-content: center;">
+		<table style="border-collapse: collapse; text-align: right;" cellpadding="6" border="1">
+			<tr><th>Scene</th><th>Primitives</th><th>Time, no BVH</th><th>Time, BVH</th><th>Speedup</th><th>Tests/ray, no BVH</th><th>Tests/ray, BVH</th></tr>
+			<tr><td style="text-align:left"><code>teapot</code></td><td>2,464</td><td>3.85 s</td><td>0.033 s</td><td>&asymp;120&times;</td><td>2,336</td><td>4.0</td></tr>
+			<tr><td style="text-align:left"><code>cow</code></td><td>5,856</td><td>7.21 s</td><td>0.029 s</td><td>&asymp;250&times;</td><td>4,299</td><td>3.1</td></tr>
+			<tr><td style="text-align:left"><code>beetle</code></td><td>7,558</td><td>8.94 s</td><td>0.027 s</td><td>&asymp;330&times;</td><td>5,267</td><td>3.8</td></tr>
+			<tr><td style="text-align:left"><code>maxplanck</code></td><td>50,801</td><td>67.95 s</td><td>0.029 s</td><td>&asymp;2,300&times;</td><td>41,867</td><td>4.3</td></tr>
+		</table>
+		</div>
+		<p>
+			The BVH now needs only 3&ndash;4 intersection tests per ray even on the 51k-triangle Max Planck head, so the render time is essentially independent of scene size, and the speedup grows from about 120&times; on the teapot to over 2,000&times; on Max Planck.
+		</p>
+		<p>
+			<b>A note on the earlier tests-per-ray numbers.</b> Profiling the slow renders also showed that the statistics counters <code>total_rays</code> and <code>total_isects</code> were a bottleneck. Every render thread incremented the same two variables on every ray, so the CPU cores kept passing that memory back and forth, and with 8&ndash;32 threads the renderer ran several times slower than it should. I changed the counters so each thread counts locally and adds to the shared total in batches of 1024, which made multithreaded rendering roughly 3&ndash;8&times; faster.
+			The old unsynchronized increments also lost updates when two threads collided, so the tests-per-ray figures in the first table above are undercounts. The times in that table are also inflated by the contention, especially the no-BVH runs, which increment the shared counter thousands of times per ray. The table directly above was measured after the fix; its tests-per-ray values are approximate only because each thread's last partial batch is not counted.
+		</p>
+
+
 		<h2>Part 3: Direct Illumination</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+<h3>
+  Walk through both implementations of the direct lighting function.
+</h3>
+<p>
+  Both estimators compute the one-bounce (direct) term of the reflection equation at the point where a camera ray first hits the scene,
+  \[L_{out}(p, \omega_o) = \int_{H^2} f(p, \omega_i \to \omega_o)\, L_i(p, \omega_i)\, \cos\theta_i \, d\omega_i,\]
+  using a Monte Carlo estimate \(\frac{1}{N}\sum_k \frac{f\, L_i\, \cos\theta_k}{p(\omega_k)}\). They differ only in how the incoming directions \(\omega_k\) are chosen, and therefore in what the pdf \(p(\omega_k)\) is.
+  The surface material in these scenes is Lambertian, so <code>DiffuseBSDF::f</code> simply returns \(\rho / \pi\) (albedo over \(\pi\)), independent of the two directions.
+</p>
+<p>
+  <b>Shared setup.</b> At the hit point I build a local coordinate frame whose \(z\)-axis is the surface normal (<code>make_coord_space</code> gives the object-to-world matrix <code>o2w</code>; its transpose is <code>w2o</code>).
+  In this frame the cosine term is just the \(z\)-component of a unit direction, and the outgoing direction is <code>w_out = w2o * (-r.d)</code>.
+  Any ray that starts at the hit point gets <code>min_t = EPS_F</code> so it does not immediately re-hit the surface it starts on.
+</p>
+<p>
+  <b>Uniform hemisphere sampling</b> (<code>estimate_direct_lighting_hemisphere</code>). I take \(N = (\text{number of lights}) \times\) <code>ns_area_light</code> samples.
+  For each one I draw a direction <code>wi</code> uniformly on the local hemisphere (pdf \(= 1/2\pi\)), convert it to world space with <code>o2w</code>, and cast a ray from the hit point in that direction.
+  If the BVH reports a hit, the incoming radiance is the <i>emission</i> of the closest surface hit, <code>bsdf-&gt;get_emission()</code>. Only light sources have non-zero emission, so this one lookup acts as both a "did I hit a light?" test and a visibility test: if a wall or the bunny is in the way, the closest hit is that object and it contributes zero.
+  The sample adds <code>f(w_out, wi) * L_i * wi.z / pdf</code>, and the sum is divided by \(N\).
+  Reflected light from the hit surface is deliberately ignored; that is indirect illumination, handled in Part 4.
+</p>
+<p>
+  <b>Importance sampling the lights</b> (<code>estimate_direct_lighting_importance</code>). Instead of shooting rays blindly, I loop over every light in <code>scene-&gt;lights</code> and ask it for sample directions with <code>sample_L(hit_p, &amp;wi, &amp;dist, &amp;pdf)</code>.
+  That returns the light's radiance, a world-space direction toward a sampled point on the light, the distance to that point, and the pdf of that direction. For an area light the pdf is already expressed per solid angle, \(\frac{r^2}{A\cos\theta_{light}}\), so it plugs straight into the same estimator.
+  A point light (a delta light) always gives the same direction, so it is sampled once; area lights are sampled <code>ns_area_light</code> times.
+  For each sample I convert <code>wi</code> into the local frame and skip it if <code>wi.z</code> is negative (the light is behind the surface).
+  Then I cast a <b>shadow ray</b> from the hit point toward the light with <code>min_t = EPS_F</code> and <code>max_t = dist - EPS_F</code>, so it neither hits its own surface nor the light's geometry, and I use <code>has_intersection</code> because I only need to know whether <i>anything</i> blocks it.
+  If it is unblocked the sample adds <code>f(w_out, wi) * L_i * wi.z / pdf</code>. Each light's samples are averaged separately (divided by that light's sample count), and the per-light results are summed.
+</p>
+<br>
+
+<h3>
+  Show some images rendered with both implementations of the direct lighting function.
+</h3>
+<p>All renders: <code>-s 64 -l 32 -m 6</code>; hemisphere sampling uses the <code>-H</code> flag.</p>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <th><b>Uniform Hemisphere Sampling</b></th>
+      <th><b>Light Sampling</b></th>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part3/CBbunny_H_64_32.png" align="middle" width="400px"/>
+        <figcaption>CBbunny.dae (73.1 s)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part3/CBbunny_L_64_32.png" align="middle" width="400px"/>
+        <figcaption>CBbunny.dae (62.5 s)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part3/CBspheres_lambertian_H_64_32.png" align="middle" width="400px"/>
+        <figcaption>CBspheres_lambertian.dae (61.8 s)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part3/CBspheres_lambertian_L_64_32.png" align="middle" width="400px"/>
+        <figcaption>CBspheres_lambertian.dae (57.3 s)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part3/dragon_H_64_32.png" align="middle" width="400px"/>
+        <figcaption>dragon.dae, point light only: completely black (83.8 s)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part3/dragon_L_64_32.png" align="middle" width="400px"/>
+        <figcaption>dragon.dae (38.2 s)</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  With the same number of samples, the hemisphere renders are visibly grainy everywhere, while the light-sampled renders are smooth.
+  The dragon scene is lit only by a point light, which has no geometry, so a random hemisphere ray can never hit it and the hemisphere render is entirely black; light sampling handles it without any problem.
+  The ceiling right next to the area light also looks different: the emissive mesh that hemisphere rays hit glows equally in every direction, including toward the ceiling, whereas <code>AreaLight::sample_L</code> only emits downward, so the ceiling stays dark with light sampling (this is expected, as the starter code notes).
+</p>
+<br>
+
+<h3>
+  Focus on one particular scene with at least one area light and compare the noise levels in <b>soft shadows</b> when rendering with 1, 4, 16, and 64 light rays (the -l flag) and with 1 sample per pixel (the -s flag) using light sampling, <b>not</b> uniform hemisphere sampling.
+</h3>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <td>
+        <img src="assets/part3/CBbunny_L_1_1.png" align="middle" width="400px"/>
+        <figcaption>1 Light Ray (CBbunny.dae)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part3/CBbunny_L_1_4.png" align="middle" width="400px"/>
+        <figcaption>4 Light Rays (CBbunny.dae)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part3/CBbunny_L_1_16.png" align="middle" width="400px"/>
+        <figcaption>16 Light Rays (CBbunny.dae)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part3/CBbunny_L_1_64.png" align="middle" width="400px"/>
+        <figcaption>64 Light Rays (CBbunny.dae)</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  The soft shadow under the bunny is the penumbra: points that can see only part of the area light. A single light ray per pixel can only report "fully visible" or "fully blocked", so with <code>-l 1</code> the penumbra is a scatter of black and bright speckles, and the shadow has no clear shape.
+  With 4 light rays each pixel can take five values (0, 1/4, &hellip;, 1 of the light visible), and the shadow's outline appears but is still very speckled. At 16 rays the gradient from the dark core under the bunny to the lit floor is clearly visible with mild grain, and at 64 rays the shadow is a smooth, soft gradient.
+  This matches Monte Carlo behaviour: the noise (standard deviation) falls as \(1/\sqrt{N}\), so every 4&times; increase in light rays halves the noise. Render time grows roughly linearly with the number of light rays (0.06 s, 0.14 s, 0.50 s, 1.97 s).
+  Note that the camera still takes only 1 sample per pixel, so object edges stay aliased; extra light rays only reduce the lighting noise.
+</p>
+<br>
+
+<h3>
+  Compare the results between uniform hemisphere sampling and lighting sampling in a one-paragraph analysis.
+</h3>
+<p>
+  Both methods estimate the same integral and converge to the same answer, but they put their samples in very different places. Uniform hemisphere sampling chooses directions without regard to where the light is, and in the Cornell box the light covers only a small solid angle of each point's hemisphere. Most samples therefore hit a wall and contribute nothing, while the rare samples that hit the light contribute a large value (divided by the small pdf \(1/2\pi\)). That high variance shows up as heavy grain across the whole image, even at 64 samples per pixel and 32 light samples.
+  Light sampling draws every sample toward the light, so every unoccluded sample contributes and the estimate has much lower variance; at the same sample counts its images are smooth, and it was also faster in all three scenes, partly because its shadow rays only need an any-hit test rather than the closest hit.
+  Light sampling can also render lights that hemisphere sampling cannot hit at all: a point light has zero area, so the probability of a random direction hitting it is zero, and the hemisphere render of <code>dragon.dae</code> is completely black.
+  The trade-off is that light sampling needs explicit light objects and per-light pdfs, and it only captures direct light from those lights; hemisphere sampling is simpler and treats any emissive surface uniformly, which is the idea we build on for indirect light in Part 4.
+</p>
+<br>
+
+
+
 
 		<h2>Part 4: Global Illumination</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+<h3>
+  Walk through your implementation of the indirect lighting function.
+</h3>
+<p>
+  <b>Sampling the BSDF.</b> <code>DiffuseBSDF::sample_f(wo, &amp;wi, &amp;pdf)</code> draws an incoming direction from a cosine-weighted hemisphere (pdf \(= \cos\theta / \pi\)), writes it to <code>wi</code> together with its pdf, and returns \(f = \rho/\pi\). Cosine weighting puts more samples near the normal, where the \(\cos\theta\) factor in the rendering equation is large.
+</p>
+<p>
+  <b>Depth bookkeeping.</b> In <code>raytrace_pixel</code> each camera ray starts with <code>depth = max_ray_depth</code>, the number of bounces it is still allowed to take, and every bounce ray gets its parent's depth minus one.
+  <code>est_radiance_global_illumination</code> intersects the camera ray with the scene. It adds the zero-bounce term (light emitted toward the camera) and, if the depth is at least 1, the result of <code>at_least_one_bounce_radiance</code>.
+</p>
+<p>
+  <b>The recursion.</b> <code>at_least_one_bounce_radiance(r, isect)</code> returns the light leaving the hit point toward the previous point on the path:
+</p>
+<ol>
+  <li>It adds the direct lighting at this hit (<code>one_bounce_radiance</code>, the light-sampling estimator from Part 3).</li>
+  <li>If <code>r.depth == 1</code> no bounces remain, so it returns.</li>
+  <li><b>Russian roulette:</b> with probability 0.3 the path is terminated here. This test is skipped on the first bounce from the camera (<code>r.depth == max_ray_depth</code>), so at least one indirect bounce is always traced when <code>max_ray_depth &gt; 1</code>.</li>
+  <li>It samples a direction <code>wi</code> with <code>sample_f</code>, converts it to world space with <code>o2w</code>, and traces a new ray from the hit point with <code>min_t = EPS_F</code> and <code>depth = r.depth - 1</code>. If that ray leaves the scene there is no indirect contribution.</li>
+  <li>Otherwise it recurses on the new hit and adds
+    \[\frac{f(\omega_o, \omega_i)\; L_{\text{recursive}}\; \cos\theta_i}{\text{pdf}(\omega_i)\; (1 - p_{\text{term}})}.\]
+    Dividing by the continuation probability \(1 - p_{\text{term}}\) makes up for the paths that were terminated, so the estimator stays unbiased.</li>
+</ol>
+<p>
+  <b>Accumulated vs. single bounces.</b> When <code>isAccumBounces</code> is true, the direct term is added at every level of the recursion, so the result is the sum of bounces 0 through \(m\). When it is false, the direct term is added only at the last level (<code>depth == 1</code>) and earlier levels just pass the recursive result through, so the output contains only light that bounced exactly \(m\) times. In the same mode the zero-bounce term is only included when <code>max_ray_depth == 0</code>.
+</p>
+<br>
+
+<h3>
+  Show some images rendered with global (direct and indirect) illumination. Use 1024 samples per pixel.
+</h3>
+<p>Rendered with <code>-s 1024 -l 4 -m 5 -r 480 360</code>.</p>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <td>
+        <img src="assets/part4/spheres_s1024.png" align="middle" width="400px"/>
+        <figcaption>CBspheres_lambertian.dae</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_accum_m5.png" align="middle" width="400px"/>
+        <figcaption>CBbunny.dae</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  Compared to the direct-only renders in Part 3, the ceiling is now lit, the shadows are no longer pure black, and the walls bleed color: the left side of the spheres and of the bunny is tinted red, the right side blue.
+</p>
+<br>
+
+<h3>
+  Pick one scene and compare rendered views first with only direct illumination, then only indirect illumination. Use 1024 samples per pixel. (You will have to edit PathTracer::at_least_one_bounce_radiance(...) in your code to generate these views.)
+</h3>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <td>
+        <img src="assets/part4/spheres_direct_only.png" align="middle" width="400px"/>
+        <figcaption>Only direct illumination (CBspheres_lambertian.dae)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/spheres_indirect_only.png" align="middle" width="400px"/>
+        <figcaption>Only indirect illumination (CBspheres_lambertian.dae)</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  The direct-only image is zero-bounce plus one-bounce light (<code>-m 1</code>). For the indirect-only image I temporarily removed the zero-bounce term and skipped <code>one_bounce_radiance</code> at the first hit from the camera (<code>r.depth == max_ray_depth</code>), keeping every later bounce (<code>-m 5</code>). Both use 1024 samples per pixel and 4 light rays.
+</p>
+<p>
+  Direct lighting gives hard contrast: surfaces facing the light are bright, while the ceiling, the bottoms of the spheres and the shadows are completely black because they cannot see the light. Indirect lighting is the opposite. It is soft and low-contrast, and it lights exactly the regions direct light misses: the ceiling, the undersides of the spheres and the shadow areas.
+  It also carries the wall colors, so the sides of the spheres facing the walls glow red and blue, and the light panel itself appears black because the light's own emission is a zero-bounce term. Adding the two images gives the full global illumination render above.
+</p>
+<br>
+
+<h3>
+  For CBbunny.dae, render the mth bounce of light with max_ray_depth set to 0, 1, 2, 3, 4, and 5 (the -m flag), and isAccumBounces=false. Explain in your writeup what you see for the 2nd and 3rd bounce of light, and how it contributes to the quality of the rendered image compared to rasterization. Use 1024 samples per pixel.
+</h3>
+<p>Rendered with <code>-s 1024 -l 4 -o 0 -r 480 360</code>.</p>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <td>
+        <img src="assets/part4/bunny_noaccum_m0.png" align="middle" width="300px"/>
+        <figcaption>0th bounce (m = 0)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_noaccum_m1.png" align="middle" width="300px"/>
+        <figcaption>1st bounce (m = 1)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_noaccum_m2.png" align="middle" width="300px"/>
+        <figcaption>2nd bounce (m = 2)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part4/bunny_noaccum_m3.png" align="middle" width="300px"/>
+        <figcaption>3rd bounce (m = 3)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_noaccum_m4.png" align="middle" width="300px"/>
+        <figcaption>4th bounce (m = 4)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_noaccum_m5.png" align="middle" width="300px"/>
+        <figcaption>5th bounce (m = 5)</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  The 0th bounce is only the light source itself, and the 1st bounce is ordinary direct lighting with black shadows and a black ceiling.
+  The <b>2nd bounce</b> is light that reflected off one surface before reaching the surface we see. It lights the ceiling, the underside of the bunny and the inside of its shadow, all of which were black in the 1st bounce. It is also where color bleeding comes from: the floor and the bunny pick up red from the left wall and blue from the right wall. The light panel is now black, because the panel itself does not reflect light.
+  The <b>3rd bounce</b> looks similar but is dimmer and even more uniform: after two diffuse reflections the light has been spread around the whole box, so there are almost no shadows left, only a faint overall glow tinted by the walls. Each later bounce is dimmer still, since every diffuse reflection absorbs part of the light (albedo &lt; 1).
+</p>
+<p>
+  A rasterizer typically shades each pixel using only the light that arrives directly from the light sources, which is essentially the 1st bounce, and approximates everything else with a constant "ambient" term. That leaves shadows and unlit areas either flat black or uniformly gray.
+  The 2nd and 3rd bounces add the light that actually arrives in those areas, with the right spatial variation: corners and creases stay darker, while areas facing a bright or colored surface get brighter and take on its color. This soft fill light, contact shadowing and color bleeding are a large part of why path-traced images look realistic.
+</p>
+<br>
+
+<h3>
+  For CBbunny.dae, compare rendered views of accumulated and unaccumulated bounces for max_ray_depth set to 0, 1, 2, 3, 4, and 5 (the -m flag). Use 1024 samples per pixel.
+</h3>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <th><b>max_ray_depth</b></th>
+      <th><b>Unaccumulated (only the mth bounce)</b></th>
+      <th><b>Accumulated (bounces 0 through m)</b></th>
+    </tr>
+    <tr align="center"><td>0</td>
+      <td><img src="assets/part4/bunny_noaccum_m0.png" width="360px"/></td>
+      <td><img src="assets/part4/bunny_accum_m0.png" width="360px"/></td></tr>
+    <tr align="center"><td>1</td>
+      <td><img src="assets/part4/bunny_noaccum_m1.png" width="360px"/></td>
+      <td><img src="assets/part4/bunny_accum_m1.png" width="360px"/></td></tr>
+    <tr align="center"><td>2</td>
+      <td><img src="assets/part4/bunny_noaccum_m2.png" width="360px"/></td>
+      <td><img src="assets/part4/bunny_accum_m2.png" width="360px"/></td></tr>
+    <tr align="center"><td>3</td>
+      <td><img src="assets/part4/bunny_noaccum_m3.png" width="360px"/></td>
+      <td><img src="assets/part4/bunny_accum_m3.png" width="360px"/></td></tr>
+    <tr align="center"><td>4</td>
+      <td><img src="assets/part4/bunny_noaccum_m4.png" width="360px"/></td>
+      <td><img src="assets/part4/bunny_accum_m4.png" width="360px"/></td></tr>
+    <tr align="center"><td>5</td>
+      <td><img src="assets/part4/bunny_noaccum_m5.png" width="360px"/></td>
+      <td><img src="assets/part4/bunny_accum_m5.png" width="360px"/></td></tr>
+  </table>
+</div>
+<p>
+  At depth 0 and 1 the two modes look the same apart from the light panel: at depth 0 both show only the light, and at depth 1 the unaccumulated image is the direct lighting alone while the accumulated one also includes the visible light panel.
+  From depth 2 on they differ a lot. The unaccumulated images get darker with every bounce, because each diffuse reflection absorbs part of the light.
+  The accumulated images get <i>brighter</i>, because each extra bounce adds its (smaller) contribution on top of what was already there. The jump from depth 1 to 2 is the largest (the ceiling and shadows light up and color bleeding appears), depth 3 adds a smaller amount, and from depth 4 on the image hardly changes because the later bounces carry very little energy.
+  In other words, the accumulated image at depth \(m\) is the sum of the unaccumulated images 0 through \(m\), and that sum converges quickly.
+</p>
+<br>
+
+<h3>
+  For CBbunny.dae, output the Russian Roulette rendering with max_ray_depth set to 0, 1, 2, 3, 4, and 100 (the -m flag). Use 1024 samples per pixel.
+</h3>
+<p>Accumulated bounces with Russian roulette (termination probability 0.3 after the first indirect bounce), <code>-s 1024 -l 4 -o 1 -r 480 360</code>.</p>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <td>
+        <img src="assets/part4/bunny_accum_m0.png" align="middle" width="300px"/>
+        <figcaption>max_ray_depth = 0</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_accum_m1.png" align="middle" width="300px"/>
+        <figcaption>max_ray_depth = 1</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_accum_m2.png" align="middle" width="300px"/>
+        <figcaption>max_ray_depth = 2</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part4/bunny_accum_m3.png" align="middle" width="300px"/>
+        <figcaption>max_ray_depth = 3</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_accum_m4.png" align="middle" width="300px"/>
+        <figcaption>max_ray_depth = 4</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/bunny_accum_m100.png" align="middle" width="300px"/>
+        <figcaption>max_ray_depth = 100</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  The images at depth 4 and depth 100 look almost identical. With a 30% chance of terminating at each bounce after the first, the chance that a path survives many bounces drops off exponentially (for example \(0.7^{10} \approx 3\%\)), and the light carried by a long path is tiny anyway after many absorbing bounces.
+  So raising the limit from 4 to 100 adds only about 25% to the render time (264 s vs. 332 s) instead of growing 25&times;; most paths stop after a few bounces on their own. Because surviving paths are divided by the continuation probability, terminating paths early does not make the image darker on average; it only adds some noise.
+</p>
+<br>
+
+<h3>
+  Pick one scene and compare rendered views with various sample-per-pixel rates, including at least 1, 2, 4, 8, 16, 64, and 1024. Use 4 light rays.
+</h3>
+<p>CBspheres_lambertian.dae, <code>-l 4 -m 5 -r 480 360</code>.</p>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <td>
+        <img src="assets/part4/spheres_s1.png" align="middle" width="400px"/>
+        <figcaption>1 sample per pixel (0.25 s)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/spheres_s2.png" align="middle" width="400px"/>
+        <figcaption>2 samples per pixel (0.49 s)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part4/spheres_s4.png" align="middle" width="400px"/>
+        <figcaption>4 samples per pixel (0.97 s)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/spheres_s8.png" align="middle" width="400px"/>
+        <figcaption>8 samples per pixel (1.94 s)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part4/spheres_s16.png" align="middle" width="400px"/>
+        <figcaption>16 samples per pixel (3.95 s)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part4/spheres_s64.png" align="middle" width="400px"/>
+        <figcaption>64 samples per pixel (16.1 s)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part4/spheres_s1024.png" align="middle" width="400px"/>
+        <figcaption>1024 samples per pixel (247.5 s)</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  At 1 sample per pixel the image is dominated by speckle noise: each pixel follows a single random path, so whether it is bright or dark depends on luck, and the walls, ceiling and spheres are covered in black and white dots. The noise is worst on the ceiling and in the shadows, which are lit only by indirect light.
+  Each doubling of the sample count reduces the noise, but slowly, because the standard deviation of a Monte Carlo estimate falls as \(1/\sqrt{N}\): going from 1 to 4 samples only halves the noise, and going from 64 to 1024 halves it twice. By 16 samples the scene is clearly readable but grainy, at 64 the grain is fine and mostly in the indirectly lit areas, and at 1024 the image is essentially clean.
+  Render time grows linearly with the number of samples, so the last few steps of noise reduction are by far the most expensive. Part 5's adaptive sampling targets exactly this cost.
+</p>
+<br>
+
+
+
 
 		<h2>Part 5: Adaptive Sampling</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+<h3>
+  Explain adaptive sampling. Walk through your implementation of the adaptive sampling.
+</h3>
+<p>
+  Different pixels converge at very different rates. A pixel on a directly lit wall gets nearly the same value from every sample and is clean after a few dozen samples, while a pixel in a soft shadow or a region lit only by indirect light needs many more. Using a fixed high sample count everywhere wastes most of the work on pixels that converged long ago.
+  Adaptive sampling instead keeps sampling each pixel only until its value is known precisely enough, and then stops.
+</p>
+<p>
+  For each pixel I keep the running sums \(s_1 = \sum_k x_k\) and \(s_2 = \sum_k x_k^2\) of the sample illuminances \(x_k\) (<code>Vector3D::illum()</code> of each sample's radiance), alongside the RGB sum used for the final color. From these, after \(n\) samples,
+  \[\mu = \frac{s_1}{n}, \qquad \sigma^2 = \frac{1}{n-1}\left(s_2 - \frac{s_1^2}{n}\right), \qquad I = 1.96\,\frac{\sigma}{\sqrt{n}},\]
+  where \(I\) is the half-width of the 95% confidence interval for the pixel's mean. The pixel has converged when \(I \le \text{maxTolerance} \cdot \mu\), i.e. we are 95% confident the true value is within 5% (the default tolerance) of the current estimate.
+  The test is relative to \(\mu\), so dark pixels do not need the same absolute precision as bright ones. I use \(\le\) so that a pixel whose samples are all black (\(\mu = \sigma = 0\)) also counts as converged.
+</p>
+<p>
+  To keep the overhead low, the check runs only after each full batch of <code>samplesPerBatch</code> samples (when \(n\) is a multiple of the batch size), up to the maximum <code>ns_aa</code>. When a pixel converges I stop the loop, average the RGB sum over the \(n\) samples actually taken, and write \(n\) into <code>sampleCountBuffer</code>. That buffer produces the sample-rate image, colored from blue (few samples) to red (the maximum).
+</p>
+<br>
+
+<h3>
+  Pick two scenes and render them with at least 2048 samples per pixel. Show a good sampling rate image with clearly visible differences in sampling rate over various regions and pixels. Include both your sample rate image, which shows your how your adaptive sampling changes depending on which part of the image you are rendering, and your noise-free rendered result. Use 1 sample per light and at least 5 for max ray depth.
+</h3>
+<p>Rendered with <code>-s 2048 -a 64 0.05 -l 1 -m 5 -r 480 360</code>.</p>
+<div align="middle">
+  <table style="width:100%">
+    <tr align="center">
+      <td>
+        <img src="assets/part5/bunny.png" align="middle" width="400px"/>
+        <figcaption>Rendered image (CBbunny.dae)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part5/bunny_rate.png" align="middle" width="400px"/>
+        <figcaption>Sample rate image (CBbunny.dae)</figcaption>
+      </td>
+    </tr>
+    <tr align="center">
+      <td>
+        <img src="assets/part5/spheres.png" align="middle" width="400px"/>
+        <figcaption>Rendered image (CBspheres_lambertian.dae)</figcaption>
+      </td>
+      <td>
+        <img src="assets/part5/spheres_rate.png" align="middle" width="400px"/>
+        <figcaption>Sample rate image (CBspheres_lambertian.dae)</figcaption>
+      </td>
+    </tr>
+  </table>
+</div>
+<p>
+  In the sample-rate images, blue means a pixel stopped early and red means it used the full 2048 samples. The renders took 101 s (bunny) and 102 s (spheres) with 64 threads, and both are essentially noise-free.
+  The back wall, the side walls and the parts of the floor in direct light are mostly blue. They receive strong, nearly uniform light from the area light, so their samples agree with each other and the pixels converge after one or two batches.
+  The light panel itself is blue too: it returns the same emitted value on every sample, so its variance is zero.
+  The red regions are the ones that get little direct light and are lit mostly by indirect bounces, so their samples vary a lot: the ceiling (which only receives light that has bounced off the walls and floor), the soft shadows under the bunny and the spheres, and the sides of the objects facing away from the light.
+  On the spheres the boundary between red and green follows the shadow terminator, where the light starts to be blocked by the sphere itself. Green bands mark the transitions, for example around the edges of the shadows and along the top of the walls next to the ceiling.
+  This is exactly the distribution we want: the sampling budget is spent on the noisy, indirectly lit regions instead of being spread evenly over pixels that converged long ago.
+</p>
+<br>
+
+
+
 
 		<h2>(Optional) Part 6: Extra Credit Opportunities</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+		<p>I did not attempt any extra credit.</p>
+
 		
-		<h2>Additional Notes (please remove)</h2>
-		<ul>
-			<li>You can also add code if you'd like as so: <code>code code code</code></li>
-			<li>If you'd like to add math equations, 
-				<ul>
-					<li>You can write inline equations like so: \( a^2 + b^2 = c^2 \)</li>
-					<li>You can write display equations like so: \[ a^2 + b^2 = c^2 \]</li>
-				</ul>
-			</li>
-		</ul>
+		<h2>Acknowledgement of AI</h2>
+		<p>
+			I used an LLM (Claude Code) to debug my code. I also used it to make the raw drafts of the write-up website.
+		</p>
 		</div>
 	</body>
 </html>
