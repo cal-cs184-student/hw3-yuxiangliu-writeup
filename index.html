@@ -33,6 +33,31 @@
 				border: 1px solid #bbb;
 				padding: 4px 10px;
 			}
+
+			img {
+				max-width: 100%;
+				height: auto;
+			}
+
+			/* PDF export for Gradescope: each part starts on a new page so pages map cleanly to rubric questions */
+			@media print {
+				.container {
+					padding: 0;
+				}
+
+				h2:not(:first-of-type) {
+					break-before: page;
+				}
+
+				h2, h3, h4 {
+					break-after: avoid;
+					break-inside: avoid;
+				}
+
+				tr, figure, img {
+					break-inside: avoid;
+				}
+			}
 		</style>
 	</head>
 	<body>
@@ -63,13 +88,13 @@
 <p>
   The main lessons were about Monte Carlo estimation: every estimator in this project is "sum of \(f \cdot L \cdot \cos\theta / \text{pdf}\), divided by the sample count", and the art is in choosing where to put the samples so the variance is low. Light importance sampling, cosine-weighted BSDF sampling, Russian roulette and adaptive sampling are all different ways of spending samples where they matter.
   I also learned some practical performance lessons. Choosing the BVH split axis well made rendering more than 40&times; faster on a 100k-triangle scene.
-  Separately, a statistics counter that every render thread incremented on every ray caused enough cache-line contention to make the renderer roughly 8&times; slower; giving each thread its own counter fixed it.
+  Separately, a statistics counter that every render thread incremented on every ray caused enough cache-line contention to make the renderer roughly 8&times; slower; giving each thread its own counter fixed it. Both speedups are written up as extra credit in Part 6.
 </p>
 
 
 		<h2>Part 1: Ray Generation and Scene Intersection</h2>
 
-		<h3>Ray generation and the rendering pipeline</h3>
+		<h3>Walk through the ray generation and primitive intersection parts of the rendering pipeline.</h3>
 		<p>
 			Rendering starts in <code>PathTracer::raytrace_pixel(x, y)</code>, which is called once for every pixel of the output image.
 			The pixel is given by the integer coordinates of its bottom-left corner. To anti-alias, I take
@@ -85,7 +110,7 @@
 			sits at the origin looking down \(-z\), and the virtual sensor is the plane \(z=-1\). Its corners lie at
 			\((\pm\tan\frac{hFov}{2}, \pm\tan\frac{vFov}{2}, -1)\), with the FOV angles converted from degrees to radians first. Normalized \((0,0)\) maps to the bottom-left
 			corner and \((1,1)\) to the top-right, so the sensor point is
-			\[ \mathbf{p}_{cam} = \left( (2x-1)\tan\tfrac{hFov}{2},\ (2y-1)\tan\tfrac{vFov}{2},\ -1 \right). \]
+			\[ \mathbf{p}_{cam} = \left( (2x-1)\tan\frac{hFov}{2},\ (2y-1)\tan\frac{vFov}{2},\ -1 \right). \]
 			The ray direction is this point rotated into world space by the camera-to-world matrix and then normalized,
 			\(\mathbf{d} = \text{normalize}(c2w \cdot \mathbf{p}_{cam})\). The ray's origin is the camera position <code>pos</code>. I also set the ray's valid
 			interval to \([t_{min}, t_{max}] = [\text{nClip}, \text{fClip}]\), the camera's near and far clipping distances, so that geometry
@@ -100,7 +125,17 @@
 			normal-shaded images below.
 		</p>
 
-		<h3>Ray-triangle intersection</h3>
+		<h4>Ray-sphere intersection</h4>
+		<p>
+			For a sphere with center \(\mathbf{c}\) and radius \(R\), substituting the ray into \(|\mathbf{p}-\mathbf{c}|^2 = R^2\)
+			gives the quadratic \(at^2 + bt + c = 0\) with \(a = \mathbf{d}\cdot\mathbf{d}\),
+			\(b = 2\,\mathbf{d}\cdot(\mathbf{o}-\mathbf{c})\), and \(c = |\mathbf{o}-\mathbf{c}|^2 - R^2\). If the discriminant
+			\(b^2-4ac\) is negative, the ray misses. Otherwise the two roots \(t_1 \le t_2\) are where the ray enters and exits the sphere. I take
+			\(t_1\) if it is in \([t_{min}, t_{max}]\), and otherwise \(t_2\), which handles rays that start inside the sphere. The normal at the
+			hit point \(\mathbf{p}\) is \(\text{normalize}(\mathbf{p}-\mathbf{c})\).
+		</p>
+
+		<h3>Explain the triangle intersection algorithm you implemented in your own words.</h3>
 		<p>
 			A ray \(\mathbf{o} + t\mathbf{d}\) hits the plane of triangle \((\mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3)\) at a point that
 			can be written in barycentric form as \(\mathbf{p}_1 + u(\mathbf{p}_2-\mathbf{p}_1) + v(\mathbf{p}_3-\mathbf{p}_1)\).
@@ -125,17 +160,7 @@
 			<code>Intersection</code>, so the intersection math lives in one place.
 		</p>
 
-		<h3>Ray-sphere intersection</h3>
-		<p>
-			For a sphere with center \(\mathbf{c}\) and radius \(R\), substituting the ray into \(|\mathbf{p}-\mathbf{c}|^2 = R^2\)
-			gives the quadratic \(at^2 + bt + c = 0\) with \(a = \mathbf{d}\cdot\mathbf{d}\),
-			\(b = 2\,\mathbf{d}\cdot(\mathbf{o}-\mathbf{c})\), and \(c = |\mathbf{o}-\mathbf{c}|^2 - R^2\). If the discriminant
-			\(b^2-4ac\) is negative, the ray misses. Otherwise the two roots \(t_1 \le t_2\) are where the ray enters and exits the sphere. I take
-			\(t_1\) if it is in \([t_{min}, t_{max}]\), and otherwise \(t_2\), which handles rays that start inside the sphere. The normal at the
-			hit point \(\mathbf{p}\) is \(\text{normalize}(\mathbf{p}-\mathbf{c})\).
-		</p>
-
-		<h3>Results</h3>
+		<h3>Show images with normal shading for a few small .dae files.</h3>
 		<p>Normal-shaded renders of small scenes (480&times;360, 4 samples per pixel, 8 threads):</p>
 		<div style="display: flex; flex-direction: column; align-items: center;">
 			<table style="width: 100%; text-align: center; border-collapse: collapse;">
@@ -164,7 +189,7 @@
 
 		<h2>Part 2: Bounding Volume Hierarchy</h2>
 
-		<h3>BVH construction</h3>
+		<h3>Walk through your BVH construction algorithm. Explain the heuristic you chose for picking the splitting point.</h3>
 		<p>
 			<code>BVHAccel::construct_bvh(start, end, max_leaf_size)</code> builds the tree recursively over the range
 			<code>[start, end)</code> of the primitive vector:
@@ -189,11 +214,11 @@
 			which the primitives are actually spread out, so tall or deep models get long, thin, overlapping boxes. That is a
 			likely reason why <code>maxplanck</code> and <code>wall-e</code> need about 270&ndash;290 intersection tests per ray, while
 			<code>CBlucy</code> and <code>CBdragon</code> need about 60. Splitting along the axis with the largest centroid extent,
-			or using the surface area heuristic, should reduce this. Building is cheap anyway: the largest scene, <code>wall-e</code> with
+			or using the surface area heuristic, should reduce this; I later switched to a longest-axis split (Part 6). Building is cheap anyway: the largest scene, <code>wall-e</code> with
 			240k primitives, builds in 0.72 s.
 		</p>
 
-		<h3>BVH traversal</h3>
+		<h4>BVH traversal</h4>
 		<p>
 			<code>BBox::intersect</code> uses the slab method. For each axis, it computes the times at which the ray crosses the box's two
 			planes. The ray is inside the box from the latest entry time to the earliest exit time, and it misses if that interval is
@@ -204,8 +229,8 @@
 			<code>r.max_t</code> when it accepts a hit, so the nearest hit wins automatically, and boxes beyond it get rejected.
 		</p>
 
-		<h3>Large scenes rendered with BVH acceleration</h3>
-		<p>Normal-shaded renders at 480&times;360, 1 sample per pixel, 8 threads. Times are wall-clock render times:</p>
+		<h3>Show images with normal shading for a few large .dae files that you can only render with BVH acceleration.</h3>
+		<p>Normal-shaded renders at 480&times;360, 1 sample per pixel, 8 threads, using the BVH described above (before the Part 6 optimizations). Times are wall-clock render times:</p>
 		<div style="display: flex; flex-direction: column; align-items: center;">
 			<table style="width: 100%; text-align: center; border-collapse: collapse;">
 			  <tr>
@@ -241,7 +266,7 @@
 			</table>
 		</div>
 
-		<h3>Rendering time with and without the BVH</h3>
+		<h3>Compare rendering times on a few scenes with moderately complex geometries with and without BVH acceleration. Present your results in a one-paragraph analysis.</h3>
 		<p>
 			To measure brute force with the same code, I added a <code>-n</code> command-line flag. It builds the "BVH" with
 			<code>max_leaf_size</code> equal to the number of primitives, so the root is a single leaf and every ray tests every
@@ -266,40 +291,13 @@
 			<code>CBdragon</code> and <code>CBlucy</code>. That is the expected logarithmic scaling, and it turns a
 			3-minute render of the cow into under 2 seconds. Speedups reach about 100&times; for every scene with more than a few thousand
 			primitives. The only scene with little benefit is <code>CBspheres_lambertian</code>, where 14 primitives are cheaper to test
-			directly than to traverse a tree for. The machine was shared and under load, so absolute times are noisy. (The cow's
-			no-BVH run was slower than the beetle's despite having fewer triangles.) The tests-per-ray figures do not depend on load,
-			and they show the same roughly 50&ndash;75&times; reduction for the larger meshes.
+			directly than to traverse a tree for. The machine was shared and under load, so absolute times are noisy (the cow's
+			no-BVH run was slower than the beetle's despite having fewer triangles). A contended statistics counter, which I found
+			and fixed later (Part 6), also inflated these times, especially for the no-BVH runs, and made the tests-per-ray figures
+			undercounts. Even so, the tests-per-ray figures show roughly 50&ndash;75&times; fewer tests for the larger meshes.
+			After the Part 6 optimizations, the speedup reaches over 2,000&times; on <code>maxplanck</code>.
 		</p>
 
-		<h3>Improving the BVH after Part 2</h3>
-		<p>
-			The analysis above pointed at the x-only split as the weak spot, and while working on Part 3 I fixed it. The renderer was also far slower than the course's reference timings, so I made three changes:
-		</p>
-		<ol>
-			<li><b>Longest-axis split.</b> Alongside the node's box, <code>construct_bvh</code> now also computes the bounding box of the primitives' <i>centroids</i> and splits along the axis on which that box is longest, still at the median. I use the centroid box instead of the node's full box because large triangles can stretch the full box along an axis where their centroids barely differ.</li>
-			<li><b><code>std::nth_element</code> instead of <code>std::sort</code>.</b> A median split only needs the median element in the middle position with smaller elements before it and larger ones after it. <code>nth_element</code> does that in \(O(n)\) time instead of \(O(n \log n)\), so the whole build is \(O(n \log n)\) instead of \(O(n \log^2 n)\).</li>
-			<li><b>Near-child-first traversal.</b> <code>BVHAccel::intersect</code> now tests the root's box once, then at each interior node tests both child boxes and visits the child the ray enters first. The far child is visited only if its entry \(t\) is not beyond the ray's current <code>max_t</code>. A hit in the near child shrinks <code>max_t</code>, so the far child is often skipped entirely, and the closest hit is still always found.</li>
-		</ol>
-		<p>
-			On <code>CBdragon.dae</code> (100k triangles), a small test render went from 1.40 s to 0.033 s, more than 40&times; faster, and the build time dropped from 0.32 s to 0.14 s.
-			With the improved BVH, the comparison against brute force looks like this (normal shading, <code>-s 1 -r 480 360</code>, 32 threads):
-		</p>
-		<div style="display: flex; justify-content: center;">
-		<table style="border-collapse: collapse; text-align: right;" cellpadding="6" border="1">
-			<tr><th>Scene</th><th>Primitives</th><th>Time, no BVH</th><th>Time, BVH</th><th>Speedup</th><th>Tests/ray, no BVH</th><th>Tests/ray, BVH</th></tr>
-			<tr><td style="text-align:left"><code>teapot</code></td><td>2,464</td><td>3.85 s</td><td>0.033 s</td><td>&asymp;120&times;</td><td>2,336</td><td>4.0</td></tr>
-			<tr><td style="text-align:left"><code>cow</code></td><td>5,856</td><td>7.21 s</td><td>0.029 s</td><td>&asymp;250&times;</td><td>4,299</td><td>3.1</td></tr>
-			<tr><td style="text-align:left"><code>beetle</code></td><td>7,558</td><td>8.94 s</td><td>0.027 s</td><td>&asymp;330&times;</td><td>5,267</td><td>3.8</td></tr>
-			<tr><td style="text-align:left"><code>maxplanck</code></td><td>50,801</td><td>67.95 s</td><td>0.029 s</td><td>&asymp;2,300&times;</td><td>41,867</td><td>4.3</td></tr>
-		</table>
-		</div>
-		<p>
-			The BVH now needs only 3&ndash;4 intersection tests per ray even on the 51k-triangle Max Planck head, so the render time is essentially independent of scene size, and the speedup grows from about 120&times; on the teapot to over 2,000&times; on Max Planck.
-		</p>
-		<p>
-			<b>A note on the earlier tests-per-ray numbers.</b> Profiling the slow renders also showed that the statistics counters <code>total_rays</code> and <code>total_isects</code> were a bottleneck. Every render thread incremented the same two variables on every ray, so the CPU cores kept passing that memory back and forth, and with 8&ndash;32 threads the renderer ran several times slower than it should. I changed the counters so each thread counts locally and adds to the shared total in batches of 1024, which made multithreaded rendering roughly 3&ndash;8&times; faster.
-			The old unsynchronized increments also lost updates when two threads collided, so the tests-per-ray figures in the first table above are undercounts. The times in that table are also inflated by the contention, especially the no-BVH runs, which increment the shared counter thousands of times per ray. The table directly above was measured after the fix; its tests-per-ray values are approximate only because each thread's last partial batch is not counted.
-		</p>
 
 
 		<h2>Part 3: Direct Illumination</h2>
@@ -510,7 +508,7 @@
 <br>
 
 <h3>
-  For CBbunny.dae, render the mth bounce of light with max_ray_depth set to 0, 1, 2, 3, 4, and 5 (the -m flag), and isAccumBounces=false. Explain in your writeup what you see for the 2nd and 3rd bounce of light, and how it contributes to the quality of the rendered image compared to rasterization. Use 1024 samples per pixel.
+  For CBbunny.dae, render the mth bounce of light with max_ray_depth set to 0, 1, 2, 3, 4, and 5 (the -m flag), and isAccumBounces=false. Explain in your write-up what you see for the 2nd and 3rd bounce of light, and how it contributes to the quality of the rendered image compared to rasterization. Use 1024 samples per pixel.
 </h3>
 <p>Rendered with <code>-s 1024 -l 4 -o 0 -r 480 360</code>.</p>
 <div align="middle">
@@ -557,7 +555,7 @@
 <br>
 
 <h3>
-  For CBbunny.dae, compare rendered views of accumulated and unaccumulated bounces for max_ray_depth set to 0, 1, 2, 3, 4, and 5 (the -m flag). Use 1024 samples per pixel.
+  Compare rendered views of accumulated and unaccumulated bounces for CBbunny.dae with max_ray_depth set to 0, 1, 2, 3, 4, and 5 (the -m flag). Use 1024 samples per pixel.
 </h3>
 <div align="middle">
   <table style="width:100%">
@@ -751,7 +749,46 @@
 
 
 		<h2>(Optional) Part 6: Extra Credit Opportunities</h2>
-		<p>I did not attempt any extra credit.</p>
+		<p>
+			I did the Challenge Level 1 item on speeding up the renderer: <i>"Profile your code and find the bottlenecks. Tell us about
+			anything that gives a significant increase in rays/sec from your initial implementation."</i> After Part 2, my renderer
+			was far slower than the course's reference timings. Two changes made the biggest difference. Improving the BVH's split,
+			build and traversal made a render of the 100k-triangle <code>CBdragon.dae</code> more than 40&times; faster, and giving
+			each thread its own statistics counters made multithreaded rendering roughly 3&ndash;8&times; faster.
+		</p>
+
+		<h3>Faster BVH: longest-axis split, linear-time partitioning, and near-child-first traversal</h3>
+		<p>
+			My Part 2 analysis pointed at the x-only split as the weak spot, so while working on Part 3 I made three changes to the BVH:
+		</p>
+		<ol>
+			<li><b>Longest-axis split.</b> Alongside the node's box, <code>construct_bvh</code> now also computes the bounding box of the primitives' <i>centroids</i> and splits along the axis on which that box is longest, still at the median. I use the centroid box instead of the node's full box because large triangles can stretch the full box along an axis where their centroids barely differ.</li>
+			<li><b><code>std::nth_element</code> instead of <code>std::sort</code>.</b> A median split only needs the median element in the middle position with smaller elements before it and larger ones after it. <code>nth_element</code> does that in \(O(n)\) time instead of \(O(n \log n)\), so the whole build is \(O(n \log n)\) instead of \(O(n \log^2 n)\).</li>
+			<li><b>Near-child-first traversal.</b> <code>BVHAccel::intersect</code> now tests the root's box once, then at each interior node tests both child boxes and visits the child the ray enters first. The far child is visited only if its entry \(t\) is not beyond the ray's current <code>max_t</code>. A hit in the near child shrinks <code>max_t</code>, so the far child is often skipped entirely, and the closest hit is still always found.</li>
+		</ol>
+		<p>
+			On <code>CBdragon.dae</code> (100k triangles), a small test render went from 1.40 s to 0.033 s, more than 40&times; faster, and the build time dropped from 0.32 s to 0.14 s.
+			With the improved BVH, the comparison against brute force looks like this (normal shading, <code>-s 1 -r 480 360</code>, 32 threads):
+		</p>
+		<div style="display: flex; justify-content: center;">
+		<table style="border-collapse: collapse; text-align: right;" cellpadding="6" border="1">
+			<tr><th>Scene</th><th>Primitives</th><th>Time, no BVH</th><th>Time, BVH</th><th>Speedup</th><th>Tests/ray, no BVH</th><th>Tests/ray, BVH</th></tr>
+			<tr><td style="text-align:left"><code>teapot</code></td><td>2,464</td><td>3.85 s</td><td>0.033 s</td><td>&asymp;120&times;</td><td>2,336</td><td>4.0</td></tr>
+			<tr><td style="text-align:left"><code>cow</code></td><td>5,856</td><td>7.21 s</td><td>0.029 s</td><td>&asymp;250&times;</td><td>4,299</td><td>3.1</td></tr>
+			<tr><td style="text-align:left"><code>beetle</code></td><td>7,558</td><td>8.94 s</td><td>0.027 s</td><td>&asymp;330&times;</td><td>5,267</td><td>3.8</td></tr>
+			<tr><td style="text-align:left"><code>maxplanck</code></td><td>50,801</td><td>67.95 s</td><td>0.029 s</td><td>&asymp;2,300&times;</td><td>41,867</td><td>4.3</td></tr>
+		</table>
+		</div>
+		<p>
+			The BVH now needs only 3&ndash;4 intersection tests per ray even on the 51k-triangle Max Planck head, so the render time is essentially independent of scene size, and the speedup grows from about 120&times; on the teapot to over 2,000&times; on Max Planck.
+			For comparison, the Part 2 BVH (median split along x) needed 19.5, 33.2 and 45.4 tests per ray on the teapot, cow and beetle, and about 270&ndash;290 on <code>maxplanck</code>. Those older figures are, if anything, too low, as explained in the next section.
+		</p>
+
+		<h3>Removing contention on the ray statistics counters</h3>
+		<p>
+			Profiling the slow renders also showed that the statistics counters <code>total_rays</code> and <code>total_isects</code> were a bottleneck. Every render thread incremented the same two variables on every ray, so the CPU cores kept passing that memory back and forth, and with 8&ndash;32 threads the renderer ran several times slower than it should. I changed the counters so each thread counts locally and adds to the shared total in batches of 1024, which made multithreaded rendering roughly 3&ndash;8&times; faster.
+			The old unsynchronized increments also lost updates when two threads collided, so the tests-per-ray figures in the Part 2 timing table are undercounts. The times in that table are also inflated by the contention, especially the no-BVH runs, which increment the shared counter thousands of times per ray. The table in the previous section was measured after the fix; its tests-per-ray values are approximate only because each thread's last partial batch is not counted.
+		</p>
 
 		
 		<h2>Acknowledgement of AI</h2>
